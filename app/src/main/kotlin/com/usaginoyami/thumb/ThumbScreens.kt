@@ -1,6 +1,7 @@
 package com.usaginoyami.thumb
 
 import android.graphics.Bitmap
+import androidx.activity.compose.BackHandler
 import android.graphics.Canvas as NativeCanvas
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -63,7 +64,7 @@ interface ThumbActions {
     fun share(uri: android.net.Uri, png: Boolean)
 }
 
-private enum class Tab(val label: String) { LAYER("Camada"), TEMPLATES("Templates"), BACKGROUND("Fundo") }
+private enum class Tab(val label: String) { LAYER("Camada"), ADD("Adicionar"), TEMPLATES("Templates"), BACKGROUND("Fundo"), PROJECTS("Projetos") }
 
 @Composable
 fun ThumbApp(vm: ThumbViewModel, actions: ThumbActions, onCyclePalette: () -> Unit) {
@@ -74,12 +75,13 @@ fun ThumbApp(vm: ThumbViewModel, actions: ThumbActions, onCyclePalette: () -> Un
         Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding()) {
             TopBar(vm, onCyclePalette)
             CanvasView(vm)
-            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ChipRow(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                 SelChip("＋ Texto", false, { vm.addText() })
                 SelChip("＋ Imagem", false, actions::pickImage)
                 SelChip("🐰 Mascote", false, { vm.addMascot() })
+                SelChip("▶ Prévia", false, { vm.openPreview() })
             }
-            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ChipRow(Modifier.padding(horizontal = 12.dp)) {
                 for (t in Tab.entries) SelChip(t.label, tab == t.ordinal, { tab = t.ordinal })
             }
             Column(
@@ -88,14 +90,19 @@ fun ThumbApp(vm: ThumbViewModel, actions: ThumbActions, onCyclePalette: () -> Un
             ) {
                 when (Tab.entries[tab]) {
                     Tab.LAYER -> LayerPanel(vm)
+                    Tab.ADD -> AddPanel(vm)
                     Tab.TEMPLATES -> TemplatesPanel(vm)
                     Tab.BACKGROUND -> BackgroundPanel(vm)
+                    Tab.PROJECTS -> ProjectsPanel(vm)
                 }
             }
         }
 
         if (vm.cutout != null) CutoutScreen(vm)
         if (vm.exportOpen) ExportSheet(vm, actions)
+        if (vm.previewOpen) PreviewScreen(vm)
+        BackHandler(enabled = vm.previewOpen) { vm.closePreview() }
+        BackHandler(enabled = vm.exportOpen) { vm.closeExport() }
 
         val msg = vm.message
         LaunchedEffect(msg) {
@@ -223,12 +230,14 @@ private fun LayerPanel(vm: ThumbViewModel) {
     when (sel) {
         is TextLayer -> TextProps(vm, sel)
         is ImageLayer -> ImageProps(vm, sel)
+        is ShapeLayer -> ShapeProps(vm, sel)
     }
 }
 
 private fun layerName(l: Layer): String = when (l) {
     is TextLayer -> "T  " + l.text.replace('\n', ' ').take(12)
     is ImageLayer -> if (l.src == MASCOT_SRC) "🐰 Mascote" else "🖼 Imagem"
+    is ShapeLayer -> "◆ " + l.kind.label
 }
 
 @Composable
@@ -260,10 +269,16 @@ private fun ImageProps(vm: ThumbViewModel, im: ImageLayer) {
         SelChip("Preencher tela", false, { vm.fillCanvas() })
         SelChip("Espelhar", im.flipH, { vm.editImage("flip") { it.copy(flipH = !it.flipH) } })
         SelChip("Preto some", im.blend == Blend.SCREEN, { vm.editImage("blend") { it.copy(blend = if (it.blend == Blend.SCREEN) Blend.NORMAL else Blend.SCREEN) } })
+        SelChip("Sticker", im.stickerWidth > 0f, { vm.editImage("stk") { it.copy(stickerWidth = if (it.stickerWidth > 0f) 0f else 14f) } })
+    }
+    if (im.stickerWidth > 0f) {
+        SectionTitle("CONTORNO STICKER")
+        SliderRow("Espessura", im.stickerWidth, 2f..50f, { v -> vm.editImage("stkw") { it.copy(stickerWidth = v) } })
+        ColorRow("Cor", im.stickerColor) { c -> vm.editImage("stkc") { it.copy(stickerColor = c) } }
     }
     SliderRow("Opacidade", im.opacity * 100f, 5f..100f, { v -> vm.editImage("op") { it.copy(opacity = v / 100f) } }, shown = "${(im.opacity * 100).toInt()}%")
     SliderRow("Girar", im.rotation, -180f..180f, { v -> vm.mutate("rot") { p -> p.get(im.id)?.let { p.replace(it.placed(it.cx, it.cy, v, it.scale)) } ?: p } }, shown = "${im.rotation.toInt()}°")
-    Hint("\"Preto some\" faz o preto da imagem ficar transparente (bom para mascote e logos em fundo preto).")
+    Hint("\"Preto some\" faz o preto da imagem ficar transparente (bom para mascote e logos em fundo preto). \"Sticker\" põe uma borda em volta do recorte: recorte o fundo primeiro (✂) para a borda acompanhar a silhueta.")
 }
 
 @Composable

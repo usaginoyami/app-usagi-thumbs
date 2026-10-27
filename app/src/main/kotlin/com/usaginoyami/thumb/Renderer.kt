@@ -5,6 +5,8 @@ import android.graphics.Canvas
 import android.graphics.DashPathEffect
 import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.PorterDuffColorFilter
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
 import android.graphics.RadialGradient
@@ -53,6 +55,10 @@ object Renderer {
             val h = lh * lines(l).size + l.outlineWidth * 2
             max(w, 20f) to max(h, 20f)
         }
+        is ShapeLayer -> {
+            val edge = if (l.filled) 0f else l.strokeWidth
+            max(l.w + edge, 20f) to max(l.h + edge, 20f)
+        }
     }
 
     private const val LINE_SPACING = 0.95f
@@ -98,12 +104,92 @@ object Renderer {
                     if (l.blend == Blend.SCREEN) p.xfermode = PorterDuffXfermode(PorterDuff.Mode.SCREEN)
                     if (l.flipH) c.scale(-1f, 1f)
                     val dst = RectF(-l.srcW / 2f, -l.srcH / 2f, l.srcW / 2f, l.srcH / 2f)
-                    c.drawBitmap(bmp, null, dst, p)
+                    if (l.stickerWidth > 0f) {
+                        // contorno + imagem num grupo só: a opacidade vale para o conjunto e a borda não "soma" nas sobreposições
+                        val box = RectF(dst).apply { inset(-l.stickerWidth - 2f, -l.stickerWidth - 2f) }
+                        val group = Paint().apply {
+                            alpha = p.alpha
+                            xfermode = p.xfermode
+                        }
+                        val saved = c.saveLayer(box, group)
+                        drawStickerOutline(c, bmp, dst, l.stickerWidth, l.stickerColor)
+                        c.drawBitmap(bmp, null, dst, Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG))
+                        c.restoreToCount(saved)
+                    } else {
+                        c.drawBitmap(bmp, null, dst, p)
+                    }
                 }
             }
             is TextLayer -> drawText(c, l)
+            is ShapeLayer -> drawShape(c, l)
         }
         c.restore()
+    }
+
+    // Direções para "engordar" a silhueta: um anel na borda e um anel pela metade, para não sobrar buraco.
+    private val outerRing = List(16) { Math.toRadians(it * 22.5) }
+    private val innerRing = List(8) { Math.toRadians(it * 45.0 + 22.5) }
+
+    /** Contorno estilo sticker: a própria imagem pintada de [color] e repetida em círculo ao redor. */
+    private fun drawStickerOutline(c: Canvas, bmp: Bitmap, dst: RectF, width: Float, color: Int) {
+        val p = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
+        p.colorFilter = PorterDuffColorFilter(color, PorterDuff.Mode.SRC_IN)
+        val moved = RectF()
+        for ((ring, radius) in listOf(outerRing to width, innerRing to width / 2f)) {
+            for (a in ring) {
+                moved.set(dst)
+                moved.offset((cos(a) * radius).toFloat(), (sin(a) * radius).toFloat())
+                c.drawBitmap(bmp, null, moved, p)
+            }
+        }
+    }
+
+    private fun shapePath(s: ShapeLayer): Path? {
+        val pts = when (s.kind) {
+            ShapeKind.ARROW -> ShapeLayer.arrowPoints(s.w, s.h)
+            ShapeKind.STAR -> ShapeLayer.starPoints(s.w, s.h)
+            else -> return null
+        }
+        return Path().apply {
+            moveTo(pts[0], pts[1])
+            for (i in 1 until pts.size / 2) lineTo(pts[i * 2], pts[i * 2 + 1])
+            close()
+        }
+    }
+
+    private fun drawShapeBody(c: Canvas, s: ShapeLayer, path: Path?, paint: Paint) {
+        val r = RectF(-s.w / 2, -s.h / 2, s.w / 2, s.h / 2)
+        when {
+            path != null -> c.drawPath(path, paint)
+            s.kind == ShapeKind.ELLIPSE -> c.drawOval(r, paint)
+            else -> c.drawRoundRect(r, 28f, 28f, paint)
+        }
+    }
+
+    /**
+     * Forma com brilho. O brilho é feito com várias passadas cada vez mais grossas e fracas
+     * (setShadowLayer não funciona em formas na tela acelerada, e assim a prévia e o arquivo saem iguais).
+     */
+    private fun drawShape(c: Canvas, s: ShapeLayer) {
+        val path = shapePath(s)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            strokeJoin = Paint.Join.ROUND
+            strokeCap = Paint.Cap.ROUND
+        }
+        val baseStroke = if (s.filled) 0f else s.strokeWidth
+        if (s.glowRadius > 0f) {
+            val steps = 8
+            for (i in steps downTo 1) {
+                paint.style = if (s.filled) Paint.Style.FILL_AND_STROKE else Paint.Style.STROKE
+                paint.strokeWidth = baseStroke + 2f * s.glowRadius * i / steps
+                paint.color = (s.color and 0xFFFFFF) or (56 shl 24)
+                drawShapeBody(c, s, path, paint)
+            }
+        }
+        paint.style = if (s.filled) Paint.Style.FILL else Paint.Style.STROKE
+        paint.strokeWidth = baseStroke
+        paint.color = s.color
+        drawShapeBody(c, s, path, paint)
     }
 
     private fun drawText(c: Canvas, t: TextLayer) {

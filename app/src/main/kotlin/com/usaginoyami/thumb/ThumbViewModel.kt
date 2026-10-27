@@ -58,6 +58,8 @@ class ThumbViewModel(app: Application) : AndroidViewModel(app) {
         ThumbIo.decodeResource(app, R.drawable.mascote_recorte)?.let { images[MASCOT_SRC] = it }
     }
 
+    private val store = ProjectStore(app)
+
     fun image(key: String): Bitmap? = images[key]
 
     val selected: Layer? get() = project.get(selectedId)
@@ -134,6 +136,23 @@ class ThumbViewModel(app: Application) : AndroidViewModel(app) {
         val id = project.nextId
         mutate { it.add { i -> ImageLayer(i, MASCOT_SRC, bmp.width, bmp.height, scale = 0.7f) } }
         selectedId = id
+    }
+
+    fun addShape(kind: ShapeKind) {
+        val id = project.nextId
+        mutate { it.add { i -> ShapeLayer.create(i, kind) } }
+        selectedId = id
+    }
+
+    fun addEmoji(emoji: String) {
+        val id = project.nextId
+        mutate { it.add { i -> emojiLayer(i, emoji) } }
+        selectedId = id
+    }
+
+    fun editShape(key: String, f: (ShapeLayer) -> ShapeLayer) {
+        val id = selectedId ?: return
+        mutate(key) { p -> (p.get(id) as? ShapeLayer)?.let { p.replace(f(it)) } ?: p }
     }
 
     fun addImage(uri: Uri) {
@@ -317,6 +336,200 @@ class ThumbViewModel(app: Application) : AndroidViewModel(app) {
     // O centro da imagem cortada, em coordenadas da imagem original, é (offX, offY) a partir do centro antigo.
     private fun centerShiftX(s: CutoutSession) = s.offX
     private fun centerShiftY(s: CutoutSession) = s.offY
+
+    // ---------- projetos salvos ----------
+
+    var projects by mutableStateOf<List<ProjectStore.Meta>>(emptyList())
+        private set
+    var currentId by mutableStateOf<String?>(null)
+        private set
+    var projectName by mutableStateOf("")
+        private set
+    var projectBusy by mutableStateOf(false)
+        private set
+
+    /** O que está gravado no disco (ou o ponto de partida): se [project] for diferente, há mudanças sem salvar. */
+    private var savedProject by mutableStateOf(project)
+
+    val hasUnsaved: Boolean get() = project != savedProject
+
+    fun refreshProjects() {
+        viewModelScope.launch {
+            projects = withContext(Dispatchers.IO) { runCatching { store.list() }.getOrDefault(emptyList()) }
+        }
+    }
+
+    /** Grava o projeto atual. [asNew] cria uma cópia em vez de sobrescrever o aberto. Devolve false se falhou. */
+    private suspend fun persist(asNew: Boolean = false): Boolean {
+        val snap = project
+        val name = projectTitle(snap)
+        val id = if (asNew) null else currentId
+        val saved = withContext(Dispatchers.IO) {
+            runCatching { store.save(id, name, snap, ::image) }.getOrNull()
+        }
+        if (saved == null) return false
+        currentId = saved
+        projectName = name
+        savedProject = snap
+        projects = withContext(Dispatchers.IO) { runCatching { store.list() }.getOrDefault(projects) }
+        return true
+    }
+
+    fun saveProject(asNew: Boolean = false) {
+        if (projectBusy) return
+        projectBusy = true
+        viewModelScope.launch {
+            try {
+                val ok = persist(asNew)
+                message = if (ok) "Projeto salvo" else "Não foi possível salvar o projeto"
+            } finally {
+                projectBusy = false
+            }
+        }
+    }
+
+    /** Ao sair do app: se o projeto já foi salvo alguma vez e mudou, grava de novo sem perguntar. */
+    fun autosave() {
+        if (currentId == null || !hasUnsaved || projectBusy) return
+        projectBusy = true
+        viewModelScope.launch {
+            try {
+                persist()
+            } finally {
+                projectBusy = false
+            }
+        }
+    }
+
+    private fun resetEditor(newProject: Project, id: String?, name: String) {
+        project = newProject
+        savedProject = newProject
+        currentId = id
+        projectName = name
+        undo.clear()
+        redo.clear()
+        lastKey = null
+        selectedId = null
+        guideX = false
+        guideY = false
+        cutout = null
+        syncUndoFlags()
+        imageVersion++
+    }
+
+    /**
+     * Salva o projeto atual (se tinha mudanças) antes de trocar. Devolve false se não deve trocar:
+     * o salvamento falhou, ou o usuário mexeu no projeto enquanto salvava (a troca apagaria essa edição).
+     */
+    private suspend fun saveBeforeSwitch(): Boolean {
+        if (!hasUnsaved) return true
+        val before = project
+        if (!persist()) {
+            message = "Não consegui salvar o projeto atual. Nada foi trocado"
+            return false
+        }
+        if (project !== before) {
+            message = "O projeto mudou durante o salvamento. Tente de novo"
+            return false
+        }
+        return true
+    }
+
+    /** Começa um projeto em branco. Se o atual tinha mudanças, ele é salvo antes para não perder nada. */
+    fun newProject() {
+        if (projectBusy) return
+        projectBusy = true
+        viewModelScope.launch {
+            try {
+                if (!saveBeforeSwitch()) return@launch
+                images.keys.filter { it != MASCOT_SRC }.forEach { images.remove(it) }
+                imgCounter = 1
+                resetEditor(Project(), null, "")
+                message = "Projeto novo"
+            } finally {
+                projectBusy = false
+            }
+        }
+    }
+
+    fun openProject(id: String) {
+        if (projectBusy) return
+        if (id == currentId) {
+            message = "Esse projeto já está aberto"
+            return
+        }
+        projectBusy = true
+        viewModelScope.launch {
+            try {
+                val opened = withContext(Dispatchers.IO) { runCatching { store.load(id) }.getOrNull() }
+                if (opened == null) {
+                    message = "Não consegui abrir esse projeto"
+                    return@launch
+                }
+                if (!saveBeforeSwitch()) return@launch
+                // camadas cuja imagem sumiu do disco são descartadas (aparece o aviso abaixo)
+                val all = opened.loaded.project
+                val kept = all.layers.filter { it !is ImageLayer || it.src == MASCOT_SRC || opened.images.containsKey(it.src) }
+                val missing = all.layers.size - kept.size
+                images.keys.filter { it != MASCOT_SRC }.forEach { images.remove(it) }
+                images.putAll(opened.images)
+                imgCounter = ProjectJson.maxImageNumber(opened.images.keys) + 1
+                resetEditor(all.copy(layers = kept), id, opened.loaded.name)
+                message = if (missing == 0) "Projeto aberto" else "Aberto, mas $missing imagem(ns) não foram encontradas"
+            } finally {
+                projectBusy = false
+            }
+        }
+    }
+
+    fun deleteProject(id: String) {
+        if (projectBusy) return
+        projectBusy = true
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { runCatching { store.delete(id) } }
+                if (id == currentId) {
+                    // o projeto aberto continua na tela, mas agora é "novo" e conta como não salvo
+                    currentId = null
+                    projectName = ""
+                    savedProject = Project()
+                }
+                projects = withContext(Dispatchers.IO) { runCatching { store.list() }.getOrDefault(emptyList()) }
+                message = "Projeto apagado"
+            } finally {
+                projectBusy = false
+            }
+        }
+    }
+
+    fun thumbFile(id: String) = store.thumbFile(id)
+
+    // ---------- prévia estilo YouTube ----------
+
+    var previewOpen by mutableStateOf(false)
+        private set
+    var previewBitmap by mutableStateOf<Bitmap?>(null)
+        private set
+    var previewTitle by mutableStateOf("Título do seu vídeo vai aparecer assim")
+    private var previewGen = 0
+
+    fun openPreview() {
+        selectedId = null
+        previewOpen = true
+        previewBitmap = null
+        val gen = ++previewGen
+        val snapshot = project
+        viewModelScope.launch {
+            val bmp = withContext(Dispatchers.Default) { Renderer.exportBitmap(snapshot, ::image) }
+            if (gen == previewGen && previewOpen) previewBitmap = bmp
+        }
+    }
+
+    fun closePreview() {
+        previewOpen = false
+        previewGen++
+        previewBitmap = null
+    }
 
     // ---------- exportar ----------
 

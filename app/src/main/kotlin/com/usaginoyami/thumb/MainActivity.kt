@@ -51,6 +51,12 @@ class MainActivity : ComponentActivity(), ThumbActions {
         }
     }
 
+    // Ao sair do app, um projeto já salvo é atualizado sozinho.
+    override fun onStop() {
+        super.onStop()
+        vm.autosave()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleSend(intent)

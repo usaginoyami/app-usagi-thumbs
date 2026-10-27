@@ -76,6 +76,8 @@ data class ImageLayer(
     val opacity: Float = 1f,
     val flipH: Boolean = false,
     val blend: Blend = Blend.NORMAL,
+    val stickerWidth: Float = 0f,       // contorno estilo sticker em volta do recorte (px da imagem); 0 = sem contorno
+    val stickerColor: Int = 0xFFFFFFFF.toInt(),
     override val cx: Float = CANVAS_W / 2f,
     override val cy: Float = CANVAS_H / 2f,
     override val rotation: Float = 0f,
@@ -83,6 +85,70 @@ data class ImageLayer(
 ) : Layer {
     override fun placed(cx: Float, cy: Float, rotation: Float, scale: Float) = copy(cx = cx, cy = cy, rotation = rotation, scale = scale)
 }
+
+enum class ShapeKind(val label: String) {
+    ARROW("Seta"),
+    ELLIPSE("Círculo"),
+    RECT("Retângulo"),
+    STAR("Estrela"),
+}
+
+/** Forma desenhada por código (seta, círculo, retângulo, estrela): serve para apontar e destacar coisas. */
+data class ShapeLayer(
+    override val id: Int,
+    val kind: ShapeKind,
+    val w: Float = 300f,
+    val h: Float = 300f,
+    val color: Int = 0xFFFF2A2A.toInt(),
+    val filled: Boolean = false,
+    val strokeWidth: Float = 18f,
+    val glowRadius: Float = 20f,        // 0 = sem brilho; o brilho usa a própria cor da forma
+    override val cx: Float = CANVAS_W / 2f,
+    override val cy: Float = CANVAS_H / 2f,
+    override val rotation: Float = 0f,
+    override val scale: Float = 1f,
+) : Layer {
+    override fun placed(cx: Float, cy: Float, rotation: Float, scale: Float) = copy(cx = cx, cy = cy, rotation = rotation, scale = scale)
+
+    companion object {
+        /** Forma nova com proporção boa para cada tipo (a seta é comprida, o resto é quadrado). */
+        fun create(id: Int, kind: ShapeKind): ShapeLayer = when (kind) {
+            ShapeKind.ARROW -> ShapeLayer(id, kind, w = 420f, h = 220f, filled = true, glowRadius = 24f)
+            ShapeKind.ELLIPSE -> ShapeLayer(id, kind, w = 360f, h = 360f)
+            ShapeKind.RECT -> ShapeLayer(id, kind, w = 420f, h = 260f)
+            ShapeKind.STAR -> ShapeLayer(id, kind, w = 300f, h = 300f, filled = true, color = 0xFFFFD400.toInt())
+        }
+
+        /** Pontos (x,y, origem no centro) do contorno da seta apontando para a direita. */
+        fun arrowPoints(w: Float, h: Float): FloatArray {
+            val shaft = h * 0.18f      // meia espessura da haste
+            val headX = w * 0.1f       // onde começa a ponta
+            return floatArrayOf(
+                -w / 2, -shaft, headX, -shaft, headX, -h / 2, w / 2, 0f,
+                headX, h / 2, headX, shaft, -w / 2, shaft,
+            )
+        }
+
+        /** Pontos da estrela de 5 pontas dentro de uma caixa [w]x[h] (10 vértices, ponta para cima). */
+        fun starPoints(w: Float, h: Float): FloatArray {
+            val out = FloatArray(20)
+            for (i in 0 until 10) {
+                val r = if (i % 2 == 0) 1f else 0.45f
+                val a = Math.toRadians(-90.0 + i * 36.0)
+                out[i * 2] = (cos(a) * r * w / 2).toFloat()
+                out[i * 2 + 1] = (sin(a) * r * h / 2).toFloat()
+            }
+            return out
+        }
+    }
+}
+
+/** Emojis de reação prontos para colar na thumb (viram uma camada de texto sem contorno). */
+val StickerEmojis: List<String> = listOf(
+    "😱", "😂", "🔥", "💀", "😡", "👀", "🤯", "😭", "👑", "⭐", "❓", "❗", "💥", "👍", "🏆", "✅", "❌", "💯",
+)
+
+fun emojiLayer(id: Int, emoji: String): TextLayer = TextLayer(id = id, text = emoji, sizePx = 220f, outlineWidth = 0f, glowRadius = 0f)
 
 const val MASCOT_SRC = "mascote"
 const val MASCOT_W = 808   // tamanho de mascote_recorte.png
@@ -103,11 +169,12 @@ data class Project(val background: Background = Background.Black, val layers: Li
     fun duplicate(id: Int): Project {
         val l = get(id) ?: return this
         val moved = l.placed(l.cx + 30f, l.cy + 30f, l.rotation, l.scale)
-        val copy = when (moved) {
+        val dup = when (moved) {
             is TextLayer -> moved.copy(id = nextId)
             is ImageLayer -> moved.copy(id = nextId)
+            is ShapeLayer -> moved.copy(id = nextId)
         }
-        return copy(layers = layers + copy, nextId = nextId + 1)
+        return copy(layers = layers + dup, nextId = nextId + 1)
     }
 
     /** [delta] = +1 sobe uma posição (para frente), -1 desce; "toFront/toBack" usam as pontas. */
@@ -124,6 +191,14 @@ data class Project(val background: Background = Background.Black, val layers: Li
 
     fun toFront(id: Int) = reorder(id, layers.size)
     fun toBack(id: Int) = reorder(id, -layers.size)
+}
+
+/** Nome automático do projeto: primeira linha do primeiro texto que tenha letra ou número (emoji sozinho não conta). */
+fun projectTitle(p: Project): String {
+    val t = p.layers.filterIsInstance<TextLayer>()
+        .map { l -> l.text.lines().firstOrNull { it.isNotBlank() }?.trim().orEmpty() }
+        .firstOrNull { s -> s.any { it.isLetterOrDigit() } }
+    return (t ?: "Thumb sem título").take(28)
 }
 
 // ---------- geometria ----------
