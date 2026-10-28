@@ -11,7 +11,7 @@ import java.nio.file.StandardCopyOption
 /**
  * Projetos salvos no armazenamento privado do app (filesDir/projects/<id>/):
  *   project.json  — camadas e fundo (ver [ProjectJson])
- *   images/*.png  — as imagens importadas/recortadas (o mascote vem do app)
+ *   images/ (arquivos .png)  — as imagens importadas/recortadas (o mascote vem do app)
  *   thumb.jpg     — miniatura 320x180 para a lista
  * Nada sai do aparelho e não precisa de permissão.
  */
