@@ -21,9 +21,25 @@ jobs:
         with:
           gradle-version: 8.9
       - name: Testes da lógica
-        run: gradle :app:testDebugUnitTest --no-daemon --stacktrace
+        run: |
+          set +e
+          gradle :app:testDebugUnitTest --no-daemon 2>&1 | tee build.log
+          code=${PIPESTATUS[0]}
+          if [ $code -ne 0 ]; then
+            msg=$(grep -E "^e: |^w: .*(error)|FAILED|What went wrong|Could not|Test.*>|Assertion|Exception" -A2 build.log | head -80 | sed 's/%/%25/g' | awk '{printf "%s%%0A",$0}')
+            echo "::error title=Falha nos testes/compilacao::$msg"
+          fi
+          exit $code
       - name: Gerar APK (debug)
-        run: gradle :app:assembleDebug --no-daemon --stacktrace
+        run: |
+          set +e
+          gradle :app:assembleDebug --no-daemon 2>&1 | tee build2.log
+          code=${PIPESTATUS[0]}
+          if [ $code -ne 0 ]; then
+            msg=$(grep -E "^e: |FAILED|What went wrong|Could not|Exception" -A2 build2.log | head -80 | sed 's/%/%25/g' | awk '{printf "%s%%0A",$0}')
+            echo "::error title=Falha no APK::$msg"
+          fi
+          exit $code
       - name: Guardar APK
         uses: actions/upload-artifact@v4
         with:
